@@ -1,0 +1,21 @@
+{
+  "name": "health-check-lambda",
+  "version": "1.0.0",
+  "description": "Lambda function for health check endpoint",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "dependencies": {
+    "aws-sdk": "^2.1450.0"
+  },
+  "devDependencies": {},
+  "keywords": [
+    "aws",
+    "lambda",
+    "health",
+    "check"
+  ],
+  "author": "DevOps Team",
+  "license": "MIT"
+} 

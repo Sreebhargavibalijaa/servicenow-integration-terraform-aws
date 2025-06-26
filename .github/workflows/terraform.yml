@@ -1,0 +1,316 @@
+name: Terraform CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main, develop ]
+    paths:
+      - 'terraform/**'
+      - 'src/**'
+      - '.github/workflows/terraform.yml'
+  pull_request:
+    branches: [ main, develop ]
+    paths:
+      - 'terraform/**'
+      - 'src/**'
+      - '.github/workflows/terraform.yml'
+
+env:
+  TF_VERSION: "1.5.0"
+  AWS_REGION: "us-east-1"
+
+jobs:
+  validate:
+    name: Validate Terraform
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v2
+      with:
+        terraform_version: ${{ env.TF_VERSION }}
+
+    - name: Terraform Format Check
+      run: terraform fmt -check -recursive terraform/
+
+    - name: Terraform Init
+      working-directory: terraform
+      run: terraform init
+
+    - name: Terraform Validate
+      working-directory: terraform
+      run: terraform validate
+
+    - name: Terraform Plan
+      working-directory: terraform
+      run: terraform plan -out=tfplan
+      env:
+        TF_VAR_servicenow_instance_url: ${{ secrets.SERVICENOW_INSTANCE_URL }}
+        TF_VAR_servicenow_client_id: ${{ secrets.SERVICENOW_CLIENT_ID }}
+        TF_VAR_servicenow_client_secret: ${{ secrets.SERVICENOW_CLIENT_SECRET }}
+
+    - name: Upload Terraform Plan
+      uses: actions/upload-artifact@v3
+      with:
+        name: terraform-plan
+        path: terraform/tfplan
+
+  security-scan:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    needs: validate
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Run Trivy vulnerability scanner
+      uses: aquasecurity/trivy-action@master
+      with:
+        scan-type: 'fs'
+        scan-ref: '.'
+        format: 'sarif'
+        output: 'trivy-results.sarif'
+
+    - name: Upload Trivy scan results to GitHub Security tab
+      uses: github/codeql-action/upload-sarif@v2
+      if: always()
+      with:
+        sarif_file: 'trivy-results.sarif'
+
+    - name: Run Checkov
+      uses: bridgecrewio/checkov-action@master
+      with:
+        directory: terraform/
+        framework: terraform
+        output_format: sarif
+        output_file_path: checkov-results.sarif
+
+    - name: Upload Checkov scan results
+      uses: github/codeql-action/upload-sarif@v2
+      if: always()
+      with:
+        sarif_file: 'checkov-results.sarif'
+
+  build-lambda:
+    name: Build Lambda Functions
+    runs-on: ubuntu-latest
+    needs: [validate, security-scan]
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v3
+      with:
+        node-version: '18'
+        cache: 'npm'
+
+    - name: Install dependencies
+      run: |
+        cd src/lambda/servicenow-api/incidents && npm install
+        cd ../changes && npm install
+        cd ../users && npm install
+        cd ../../health && npm install
+        cd ../notifications && npm install
+
+    - name: Create dist directory
+      run: mkdir -p dist
+
+    - name: Build Lambda packages
+      run: |
+        cd src/lambda/servicenow-api/incidents && zip -r ../../../../dist/incidents.zip .
+        cd ../changes && zip -r ../../../../dist/changes.zip .
+        cd ../users && zip -r ../../../../dist/users.zip .
+        cd ../../health && zip -r ../../../dist/health.zip .
+        cd ../notifications && zip -r ../../../dist/notifications.zip .
+
+    - name: Upload Lambda packages
+      uses: actions/upload-artifact@v3
+      with:
+        name: lambda-packages
+        path: dist/*.zip
+
+  deploy-dev:
+    name: Deploy to Development
+    runs-on: ubuntu-latest
+    needs: [validate, security-scan, build-lambda]
+    if: github.ref == 'refs/heads/develop'
+    environment: development
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Download Lambda packages
+      uses: actions/download-artifact@v3
+      with:
+        name: lambda-packages
+        path: dist/
+
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v2
+      with:
+        terraform_version: ${{ env.TF_VERSION }}
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Terraform Init
+      working-directory: terraform
+      run: terraform init
+
+    - name: Terraform Plan
+      working-directory: terraform
+      run: terraform plan -out=tfplan
+      env:
+        TF_VAR_servicenow_instance_url: ${{ secrets.SERVICENOW_INSTANCE_URL }}
+        TF_VAR_servicenow_client_id: ${{ secrets.SERVICENOW_CLIENT_ID }}
+        TF_VAR_servicenow_client_secret: ${{ secrets.SERVICENOW_CLIENT_SECRET }}
+
+    - name: Terraform Apply
+      working-directory: terraform
+      run: terraform apply -auto-approve tfplan
+      env:
+        TF_VAR_servicenow_instance_url: ${{ secrets.SERVICENOW_INSTANCE_URL }}
+        TF_VAR_servicenow_client_id: ${{ secrets.SERVICENOW_CLIENT_ID }}
+        TF_VAR_servicenow_client_secret: ${{ secrets.SERVICENOW_CLIENT_SECRET }}
+
+    - name: Get API Gateway URL
+      working-directory: terraform
+      run: |
+        API_URL=$(terraform output -raw api_gateway_url)
+        echo "API_URL=$API_URL" >> $GITHUB_ENV
+
+    - name: Test API endpoints
+      run: |
+        # Test health endpoint
+        curl -f ${{ env.API_URL }}/health || exit 1
+        
+        # Test incidents endpoint
+        curl -f ${{ env.API_URL }}/incidents || exit 1
+
+    - name: Notify deployment success
+      uses: 8398a7/action-slack@v3
+      if: success()
+      with:
+        status: success
+        text: "✅ Development deployment successful! API URL: ${{ env.API_URL }}"
+      env:
+        SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+    - name: Notify deployment failure
+      uses: 8398a7/action-slack@v3
+      if: failure()
+      with:
+        status: failure
+        text: "❌ Development deployment failed!"
+      env:
+        SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+  deploy-prod:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    needs: [validate, security-scan, build-lambda]
+    if: github.ref == 'refs/heads/main'
+    environment: production
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Download Lambda packages
+      uses: actions/download-artifact@v3
+      with:
+        name: lambda-packages
+        path: dist/
+
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v2
+      with:
+        terraform_version: ${{ env.TF_VERSION }}
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Terraform Init
+      working-directory: terraform
+      run: terraform init
+
+    - name: Terraform Plan
+      working-directory: terraform
+      run: terraform plan -out=tfplan
+      env:
+        TF_VAR_servicenow_instance_url: ${{ secrets.SERVICENOW_INSTANCE_URL }}
+        TF_VAR_servicenow_client_id: ${{ secrets.SERVICENOW_CLIENT_ID }}
+        TF_VAR_servicenow_client_secret: ${{ secrets.SERVICENOW_CLIENT_SECRET }}
+
+    - name: Terraform Apply
+      working-directory: terraform
+      run: terraform apply -auto-approve tfplan
+      env:
+        TF_VAR_servicenow_instance_url: ${{ secrets.SERVICENOW_INSTANCE_URL }}
+        TF_VAR_servicenow_client_id: ${{ secrets.SERVICENOW_CLIENT_ID }}
+        TF_VAR_servicenow_client_secret: ${{ secrets.SERVICENOW_CLIENT_SECRET }}
+
+    - name: Get API Gateway URL
+      working-directory: terraform
+      run: |
+        API_URL=$(terraform output -raw api_gateway_url)
+        echo "API_URL=$API_URL" >> $GITHUB_ENV
+
+    - name: Test API endpoints
+      run: |
+        # Test health endpoint
+        curl -f ${{ env.API_URL }}/health || exit 1
+        
+        # Test incidents endpoint
+        curl -f ${{ env.API_URL }}/incidents || exit 1
+
+    - name: Notify deployment success
+      uses: 8398a7/action-slack@v3
+      if: success()
+      with:
+        status: success
+        text: "🚀 Production deployment successful! API URL: ${{ env.API_URL }}"
+      env:
+        SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+    - name: Notify deployment failure
+      uses: 8398a7/action-slack@v3
+      if: failure()
+      with:
+        status: failure
+        text: "💥 Production deployment failed!"
+      env:
+        SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+  cleanup:
+    name: Cleanup
+    runs-on: ubuntu-latest
+    needs: [deploy-dev, deploy-prod]
+    if: always()
+    
+    steps:
+    - name: Cleanup artifacts
+      run: |
+        echo "Cleaning up build artifacts..."
+        
+    - name: Notify completion
+      uses: 8398a7/action-slack@v3
+      with:
+        status: success
+        text: "🏁 CI/CD pipeline completed"
+      env:
+        SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }} 
