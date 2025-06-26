@@ -1,10 +1,10 @@
 # Automated Deployment Pipeline for ServiceNow Integration APIs using Terraform on AWS
 
-## 🎯 Project Overview
+## Project Overview
 
 This project demonstrates a production-ready CI/CD pipeline for deploying ServiceNow integration APIs on AWS using Terraform. It showcases enterprise-level infrastructure automation, security best practices, and DevOps principles that are highly relevant for ServiceNow roles.
 
-## 🏗️ Architecture
+## Architecture
 
 ```
 ┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
@@ -24,7 +24,7 @@ This project demonstrates a production-ready CI/CD pipeline for deploying Servic
 └─────────────────┘    └─────────────────┘    └─────────────────┘
 ```
 
-## 🚀 Key Features
+## Key Features
 
 - **Infrastructure as Code**: Complete AWS infrastructure defined in Terraform
 - **CI/CD Pipeline**: Automated deployment via GitHub Actions
@@ -33,7 +33,7 @@ This project demonstrates a production-ready CI/CD pipeline for deploying Servic
 - **Scalability**: Serverless architecture with Lambda and API Gateway
 - **ServiceNow Integration**: Ready-to-use API endpoints for ServiceNow operations
 
-## 📁 Project Structure
+## Project Structure
 
 ```
 TERRFORM-CI/
@@ -62,7 +62,7 @@ TERRFORM-CI/
 └── tests/                       # Infrastructure and unit tests
 ```
 
-## 🛠️ Prerequisites
+## Prerequisites
 
 - AWS CLI configured with appropriate permissions
 - Terraform CLI (v1.0+)
@@ -70,7 +70,7 @@ TERRFORM-CI/
 - Terraform Cloud account (for remote state management)
 - ServiceNow instance with API access
 
-## 🚀 Quick Start
+## Quick Start
 
 ### 1. Clone and Setup
 
